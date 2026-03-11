@@ -17,9 +17,10 @@ await runWizardIfNeeded(authStorage)
 const modelRegistry = new ModelRegistry(authStorage)
 const settingsManager = SettingsManager.create(agentDir)
 
-// Always ensure defaults: anthropic/claude-sonnet-4-6, thinking off.
-// Validates on every startup — catches stale settings from prior installs
+// Validate configured model on startup — catches stale settings from prior installs
 // (e.g. grok-2 which no longer exists) and fresh installs with no settings.
+// Only resets the default when the configured model no longer exists in the registry;
+// never overwrites a valid user choice.
 const configuredProvider = settingsManager.getDefaultProvider()
 const configuredModel = settingsManager.getDefaultModel()
 const allModels = modelRegistry.getAll()
@@ -27,10 +28,10 @@ const configuredExists = configuredProvider && configuredModel &&
   allModels.some((m) => m.provider === configuredProvider && m.id === configuredModel)
 
 if (!configuredModel || !configuredExists) {
-  // Preferred default: anthropic/claude-sonnet-4-6
+  // Fallback: pick the best available Anthropic model
   const preferred =
-    allModels.find((m) => m.provider === 'anthropic' && m.id === 'claude-sonnet-4-6') ||
-    allModels.find((m) => m.provider === 'anthropic' && m.id.includes('sonnet')) ||
+    allModels.find((m) => m.provider === 'anthropic' && m.id === 'claude-opus-4-6') ||
+    allModels.find((m) => m.provider === 'anthropic' && m.id.includes('opus')) ||
     allModels.find((m) => m.provider === 'anthropic')
   if (preferred) {
     settingsManager.setDefaultModelAndProvider(preferred.provider, preferred.id)
@@ -69,6 +70,49 @@ const { session, extensionsResult } = await createAgentSession({
 if (extensionsResult.errors.length > 0) {
   for (const err of extensionsResult.errors) {
     process.stderr.write(`[gsd] Extension load error: ${err.error}\n`)
+  }
+}
+
+// Restore scoped models from settings on startup.
+// The upstream InteractiveMode reads enabledModels from settings when /scoped-models is opened,
+// but doesn't apply them to the session at startup — so Ctrl+P cycles all models instead of
+// just the saved selection until the user re-runs /scoped-models.
+const enabledModelPatterns = settingsManager.getEnabledModels()
+if (enabledModelPatterns && enabledModelPatterns.length > 0) {
+  const availableModels = modelRegistry.getAvailable()
+  const scopedModels: Array<{ model: (typeof availableModels)[number] }> = []
+  const seen = new Set<string>()
+
+  for (const pattern of enabledModelPatterns) {
+    // Patterns are "provider/modelId" exact strings saved by /scoped-models
+    const slashIdx = pattern.indexOf('/')
+    if (slashIdx !== -1) {
+      const provider = pattern.substring(0, slashIdx)
+      const modelId = pattern.substring(slashIdx + 1)
+      const model = availableModels.find((m) => m.provider === provider && m.id === modelId)
+      if (model) {
+        const key = `${model.provider}/${model.id}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          scopedModels.push({ model })
+        }
+      }
+    } else {
+      // Fallback: match by model id alone
+      const model = availableModels.find((m) => m.id === pattern)
+      if (model) {
+        const key = `${model.provider}/${model.id}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          scopedModels.push({ model })
+        }
+      }
+    }
+  }
+
+  // Only apply if we resolved some models and it's a genuine subset
+  if (scopedModels.length > 0 && scopedModels.length < availableModels.length) {
+    session.setScopedModels(scopedModels)
   }
 }
 
