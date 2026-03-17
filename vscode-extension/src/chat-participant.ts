@@ -15,21 +15,36 @@ export function registerChatParticipant(
 		response: vscode.ChatResponseStream,
 		token: vscode.CancellationToken,
 	) => {
+		// Auto-start the agent if not connected
 		if (!client.isConnected) {
-			response.markdown("GSD agent is not running. Use the **GSD: Start Agent** command first.");
-			return;
+			response.progress("Starting GSD agent...");
+			try {
+				await client.start();
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				response.markdown(`**Failed to start GSD agent:** ${msg}\n\nMake sure \`gsd\` is installed (\`npm install -g gsd-pi\`) and try again.`);
+				return;
+			}
 		}
 
-		const message = request.prompt;
-		if (!message.trim()) {
+		// Build the full message, injecting any #file references
+		let message = request.prompt.trim();
+		if (!message) {
 			response.markdown("Please provide a message.");
 			return;
 		}
 
-		// Track streaming events while the prompt executes
+		const fileContext = await buildFileContext(request);
+		if (fileContext) {
+			message = `${fileContext}\n\n${message}`;
+		}
+
+		// Track streaming state
 		let agentDone = false;
 		let totalInputTokens = 0;
 		let totalOutputTokens = 0;
+		const filesWritten: string[] = [];
+		const filesRead: string[] = [];
 
 		const eventHandler = (event: AgentEvent) => {
 			switch (event.type) {
@@ -40,44 +55,18 @@ export function registerChatParticipant(
 				case "tool_execution_start": {
 					const toolName = event.toolName as string;
 					const toolInput = event.toolInput as Record<string, unknown> | undefined;
+					const detail = describeToolCall(toolName, toolInput);
+					response.progress(detail);
 
-					let detail = `Running tool: ${toolName}`;
-
-					// Show relevant parameters for common tools
-					if (toolInput) {
-						if (toolName === "Read" && toolInput.file_path) {
-							detail = `Reading: ${toolInput.file_path}`;
-						} else if (toolName === "Write" && toolInput.file_path) {
-							detail = `Writing: ${toolInput.file_path}`;
-						} else if (toolName === "Edit" && toolInput.file_path) {
-							detail = `Editing: ${toolInput.file_path}`;
-						} else if (toolName === "Bash" && toolInput.command) {
-							const cmd = String(toolInput.command);
-							detail = `Running: $ ${cmd.length > 80 ? cmd.slice(0, 77) + "..." : cmd}`;
-						} else if (toolName === "Glob" && toolInput.pattern) {
-							detail = `Searching: ${toolInput.pattern}`;
-						} else if (toolName === "Grep" && toolInput.pattern) {
-							detail = `Grep: ${toolInput.pattern}`;
+					// Track file paths for anchors
+					if (toolInput?.file_path) {
+						const fp = String(toolInput.file_path);
+						if (toolName === "Write" || toolName === "Edit") {
+							if (!filesWritten.includes(fp)) filesWritten.push(fp);
+						} else if (toolName === "Read") {
+							if (!filesRead.includes(fp)) filesRead.push(fp);
 						}
 					}
-
-					response.progress(detail);
-					break;
-				}
-
-				case "tool_execution_end": {
-					const toolName = event.toolName as string;
-					const isError = event.isError as boolean;
-					if (isError) {
-						response.markdown(`\n**Tool \`${toolName}\` failed**\n`);
-					} else {
-						response.markdown(`\n*Tool \`${toolName}\` completed*\n`);
-					}
-					break;
-				}
-
-				case "message_start": {
-					// Assistant message starting
 					break;
 				}
 
@@ -91,17 +80,16 @@ export function registerChatParticipant(
 							response.markdown(delta);
 						}
 					} else if (assistantEvent.type === "thinking_delta") {
-						// Show thinking content in a collapsed section
+						// Thinking shown inline — prefix with italic so it's visually distinct
 						const delta = assistantEvent.delta as string | undefined;
 						if (delta) {
-							response.markdown(delta);
+							response.markdown(`*${delta}*`);
 						}
 					}
 					break;
 				}
 
 				case "message_end": {
-					// Capture token usage from message end events
 					const usage = event.usage as { inputTokens?: number; outputTokens?: number } | undefined;
 					if (usage) {
 						if (usage.inputTokens) totalInputTokens += usage.inputTokens;
@@ -118,7 +106,6 @@ export function registerChatParticipant(
 
 		const subscription = client.onEvent(eventHandler);
 
-		// Handle cancellation
 		token.onCancellationRequested(() => {
 			client.abort().catch(() => {});
 		});
@@ -132,29 +119,39 @@ export function registerChatParticipant(
 					resolve();
 					return;
 				}
-
 				const checkDone = client.onEvent((evt) => {
 					if (evt.type === "agent_end") {
 						checkDone.dispose();
 						resolve();
 					}
 				});
-
 				token.onCancellationRequested(() => {
 					checkDone.dispose();
 					resolve();
 				});
 			});
 
-			// Show token usage summary at the end
+			// Show clickable file anchors for written files
+			if (filesWritten.length > 0) {
+				response.markdown("\n\n**Files changed:**");
+				for (const fp of filesWritten) {
+					const uri = resolveFileUri(fp);
+					if (uri) {
+						response.anchor(uri, fp);
+						response.markdown(" ");
+					}
+				}
+			}
+
+			// Token usage summary
 			if (totalInputTokens > 0 || totalOutputTokens > 0) {
 				response.markdown(
-					`\n\n---\n*Tokens: ${totalInputTokens.toLocaleString()} in / ${totalOutputTokens.toLocaleString()} out*\n`,
+					`\n\n---\n*${totalInputTokens.toLocaleString()} in / ${totalOutputTokens.toLocaleString()} out tokens*`,
 				);
 			}
 		} catch (err) {
 			const errorMessage = err instanceof Error ? err.message : String(err);
-			response.markdown(`\n**Error:** ${errorMessage}\n`);
+			response.markdown(`\n**Error:** ${errorMessage}`);
 		} finally {
 			subscription.dispose();
 		}
@@ -162,5 +159,125 @@ export function registerChatParticipant(
 
 	participant.iconPath = new vscode.ThemeIcon("hubot");
 
+	// Follow-up suggestions after each response
+	participant.followupProvider = {
+		provideFollowups: (_result, _context, _token) => {
+			return [
+				{
+					prompt: "/gsd status",
+					label: "$(info) Check status",
+					title: "Check project status",
+				},
+				{
+					prompt: "/gsd auto",
+					label: "$(rocket) Run auto mode",
+					title: "Run autonomous mode",
+				},
+				{
+					prompt: "/gsd capture",
+					label: "$(note) Capture a thought",
+					title: "Capture a thought mid-session",
+				},
+			];
+		},
+	};
+
 	return participant;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Build a file context block from any #file references in the chat request.
+ */
+async function buildFileContext(request: vscode.ChatRequest): Promise<string | null> {
+	if (!request.references || request.references.length === 0) {
+		return null;
+	}
+
+	const parts: string[] = [];
+
+	for (const ref of request.references) {
+		if (ref.value instanceof vscode.Uri) {
+			try {
+				const bytes = await vscode.workspace.fs.readFile(ref.value);
+				const content = Buffer.from(bytes).toString("utf-8");
+				const relativePath = vscode.workspace.asRelativePath(ref.value);
+				parts.push(`File: ${relativePath}\n\`\`\`\n${content}\n\`\`\``);
+			} catch {
+				// Skip unreadable files
+			}
+		} else if (ref.value instanceof vscode.Location) {
+			try {
+				const doc = await vscode.workspace.openTextDocument(ref.value.uri);
+				const text = doc.getText(ref.value.range);
+				const relativePath = vscode.workspace.asRelativePath(ref.value.uri);
+				const { start, end } = ref.value.range;
+				parts.push(`File: ${relativePath} (lines ${start.line + 1}–${end.line + 1})\n\`\`\`\n${text}\n\`\`\``);
+			} catch {
+				// Skip unreadable ranges
+			}
+		}
+	}
+
+	return parts.length > 0 ? parts.join("\n\n") : null;
+}
+
+/**
+ * Produce a human-readable progress label for a tool call.
+ */
+function describeToolCall(toolName: string, input?: Record<string, unknown>): string {
+	if (!input) {
+		return `Running: ${toolName}`;
+	}
+	switch (toolName) {
+		case "Read":
+			return `Reading: ${shortenPath(String(input.file_path ?? ""))}`;
+		case "Write":
+			return `Writing: ${shortenPath(String(input.file_path ?? ""))}`;
+		case "Edit":
+			return `Editing: ${shortenPath(String(input.file_path ?? ""))}`;
+		case "Bash": {
+			const cmd = String(input.command ?? "");
+			return `$ ${cmd.length > 80 ? cmd.slice(0, 77) + "…" : cmd}`;
+		}
+		case "Glob":
+			return `Searching: ${input.pattern ?? ""}`;
+		case "Grep":
+			return `Grep: ${input.pattern ?? ""}`;
+		case "WebSearch":
+			return `Searching web: ${String(input.query ?? "").slice(0, 60)}`;
+		case "WebFetch":
+			return `Fetching: ${String(input.url ?? "").slice(0, 60)}`;
+		default:
+			return `Running: ${toolName}`;
+	}
+}
+
+/**
+ * Shorten an absolute path to just the last 2–3 segments for display.
+ */
+function shortenPath(fp: string): string {
+	const parts = fp.replace(/\\/g, "/").split("/");
+	return parts.slice(-3).join("/");
+}
+
+/**
+ * Attempt to resolve a file path string to a VS Code URI.
+ */
+function resolveFileUri(fp: string): vscode.Uri | null {
+	try {
+		const workspaceFolders = vscode.workspace.workspaceFolders;
+		if (!workspaceFolders || workspaceFolders.length === 0) {
+			return null;
+		}
+		// Absolute path
+		if (fp.startsWith("/") || /^[A-Za-z]:[\\/]/.test(fp)) {
+			return vscode.Uri.file(fp);
+		}
+		// Relative path — resolve against first workspace folder
+		return vscode.Uri.joinPath(workspaceFolders[0].uri, fp);
+	} catch {
+		return null;
+	}
 }
