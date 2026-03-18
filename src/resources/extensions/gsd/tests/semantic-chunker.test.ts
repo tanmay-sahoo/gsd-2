@@ -408,3 +408,19 @@ test("formatChunks does not show omission for contiguous chunks", () => {
 	const formatted = formatChunks(result, "src/test.ts");
 	assert.ok(!formatted.includes("omitted"), "Contiguous chunks should not show omission");
 });
+
+// ─── inlineFileSmart integration tests ─────────────────────────────────────
+
+// These test the formatChunks function in the context of how it'll be used
+test("formatChunks includes file path in line range headers", () => {
+	const result = chunkByRelevance(
+		"export function foo() {}\n\nexport function bar() {}\n\nexport function baz() {}",
+		"foo function",
+		{ maxChunks: 1 },
+	);
+	const formatted = formatChunks(result, "src/utils.ts");
+	assert.ok(
+		formatted.includes("src/utils.ts") || formatted.includes("[Lines"),
+		"Formatted output should include file path or line range markers",
+	);
+});

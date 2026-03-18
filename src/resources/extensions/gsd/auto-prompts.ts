@@ -24,6 +24,7 @@ import { computeBudgets, resolveExecutorContextWindow } from "./context-budget.j
 import { compressToTarget } from "./prompt-compressor.js";
 import { distillSummaries } from "./summary-distiller.js";
 import { formatDecisionsCompact, formatRequirementsCompact } from "./structured-data-formatter.js";
+import { chunkByRelevance, formatChunks } from "./semantic-chunker.js";
 
 // ─── Executor Constraints ─────────────────────────────────────────────────────
 
@@ -82,6 +83,43 @@ export async function inlineFileOptional(
   const content = absPath ? await loadFile(absPath) : null;
   if (!content) return null;
   return `### ${label}\nSource: \`${relPath}\`\n\n${content.trim()}`;
+}
+
+/**
+ * Smart file inlining — for large files, use semantic chunking to include
+ * only the most relevant portions based on the task context.
+ * Falls back to full content for small files or when no query is provided.
+ *
+ * @param absPath Absolute file path
+ * @param relPath Relative display path
+ * @param label Section label
+ * @param query Task description for relevance scoring (optional)
+ * @param threshold Character threshold for chunking (default: 3000)
+ */
+export async function inlineFileSmart(
+  absPath: string | null, relPath: string, label: string,
+  query?: string, threshold = 3000,
+): Promise<string> {
+  const content = absPath ? await loadFile(absPath) : null;
+  if (!content) {
+    return `### ${label}\nSource: \`${relPath}\`\n\n_(not found — file does not exist yet)_`;
+  }
+
+  // For small files or no query, include full content
+  if (content.length <= threshold || !query) {
+    return `### ${label}\nSource: \`${relPath}\`\n\n${content.trim()}`;
+  }
+
+  // Use semantic chunking for large files
+  const result = chunkByRelevance(content, query, { maxChunks: 5, minScore: 0.05 });
+
+  // If chunking didn't save much (< 20%), just include full content
+  if (result.savingsPercent < 20) {
+    return `### ${label}\nSource: \`${relPath}\`\n\n${content.trim()}`;
+  }
+
+  const formatted = formatChunks(result, relPath);
+  return `### ${label} (${result.omittedChunks} sections omitted for relevance)\nSource: \`${relPath}\`\n\n${formatted}`;
 }
 
 /**
@@ -730,15 +768,25 @@ export async function buildExecuteTaskPrompt(
     : priorSummaries;
   const carryForwardSection = await buildCarryForwardSection(effectivePriorSummaries, base);
 
-  // Inline project knowledge if available
-  const knowledgeInlineET = await inlineGsdRootFile(base, "knowledge.md", "Project Knowledge");
+  // Inline project knowledge if available (smart-chunked for relevance)
+  const knowledgeAbsPath = resolveGsdRootFile(base, "KNOWLEDGE");
+  const knowledgeInlineET = existsSync(knowledgeAbsPath)
+    ? await inlineFileSmart(
+        knowledgeAbsPath,
+        relGsdRootFile("KNOWLEDGE"),
+        "Project Knowledge",
+        `${tTitle} ${sTitle}`,  // use task + slice title as relevance query
+      )
+    : null;
+  // Only include if it has content (not a "not found" result)
+  const knowledgeContent = knowledgeInlineET && !knowledgeInlineET.includes("not found") ? knowledgeInlineET : null;
 
   const inlinedTemplates = inlineLevel === "minimal"
     ? inlineTemplate("task-summary", "Task Summary")
     : [
         inlineTemplate("task-summary", "Task Summary"),
         inlineTemplate("decisions", "Decisions"),
-        ...(knowledgeInlineET ? [knowledgeInlineET] : []),
+        ...(knowledgeContent ? [knowledgeContent] : []),
       ].join("\n\n---\n\n");
 
   const taskSummaryPath = join(base, `${relSlicePath(base, mid, sid)}/tasks/${tid}-SUMMARY.md`);
