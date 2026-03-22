@@ -25,6 +25,7 @@
 
 - `node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/resources/extensions/gsd/tests/engine-interfaces-contract.test.ts` — all contract tests pass
 - `node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/resources/extensions/gsd/tests/auto-session-encapsulation.test.ts` — existing encapsulation tests still pass (validates `activeEngineId` in `reset()`)
+- `node --experimental-strip-types -e "import('./src/resources/extensions/gsd/engine-resolver.ts').then(m => { try { m.resolveEngine({ activeEngineId: null }); process.exit(1) } catch(e) { process.exit(0) } })"` — resolver throws for any input (failure-path diagnostic)
 
 ## Integration Closure
 
@@ -34,7 +35,7 @@
 
 ## Tasks
 
-- [ ] **T01: Create engine type contracts and interface files** `est:20m`
+- [x] **T01: Create engine type contracts and interface files** `est:20m`
   - Why: Establishes the four foundational files that all subsequent slices depend on — the leaf-node types, the `WorkflowEngine` interface, the `ExecutionPolicy` interface, and the stub resolver
   - Files: `src/resources/extensions/gsd/engine-types.ts`, `src/resources/extensions/gsd/workflow-engine.ts`, `src/resources/extensions/gsd/execution-policy.ts`, `src/resources/extensions/gsd/engine-resolver.ts`
   - Do: Port the four files from `feat/declarative-workflow-engine-v2` branch. `engine-types.ts`, `workflow-engine.ts`, and `execution-policy.ts` are taken as-is. `engine-resolver.ts` must be modified — remove all implementation imports (`DevWorkflowEngine`, `DevExecutionPolicy`, `CustomWorkflowEngine`, `CustomExecutionPolicy`), keep only the `ResolvedEngine` type export and `resolveEngine()` function that throws `"No engines registered — S02 provides DevWorkflowEngine"` for any input. Verify `engine-types.ts` has zero imports from GSD modules.
@@ -47,6 +48,14 @@
   - Do: Add `activeEngineId: string | null = null` property to `AutoSession`. Add it to `reset()` (set to `null`) and `toJSON()`. Then write `engine-interfaces-contract.test.ts` following the same pattern as `auto-session-encapsulation.test.ts` — source-level regex assertions on all four new files plus runtime assertions on `AutoSession.activeEngineId` and `resolveEngine()` behavior.
   - Verify: `node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/resources/extensions/gsd/tests/engine-interfaces-contract.test.ts` passes AND `node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/resources/extensions/gsd/tests/auto-session-encapsulation.test.ts` still passes
   - Done when: contract test file exists with assertions for all must-haves; both test suites pass with 0 failures
+
+## Observability / Diagnostics
+
+- **Resolver failure signal**: `resolveEngine()` throws with a structured message (`"No engines registered — S02 provides DevWorkflowEngine"`) that identifies the missing capability. Downstream callers can catch and surface this to the agent.
+- **Inspection surface**: All four type files are pure declarations with no side effects. Correctness is verified by source-level contract tests (regex assertions on the file contents) — the test file itself is the diagnostic artifact.
+- **Failure visibility**: If `engine-types.ts` gains a GSD import, the contract test fails with an explicit assertion naming the leaf-node constraint. If `resolveEngine()` stops throwing, the runtime assertion in the contract test catches it.
+- **activeEngineId lifecycle**: `AutoSession.toJSON()` includes `activeEngineId`, making it visible in session snapshots and debug dumps.
+- **Redaction**: No secrets or user data in these type contracts — no redaction needed.
 
 ## Files Likely Touched
 

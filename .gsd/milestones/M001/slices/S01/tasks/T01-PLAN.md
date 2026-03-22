@@ -83,3 +83,10 @@ The build order matters: `engine-types.ts` is the leaf node (no GSD imports), `w
 - `src/resources/extensions/gsd/workflow-engine.ts` — new file with `WorkflowEngine` interface
 - `src/resources/extensions/gsd/execution-policy.ts` — new file with `ExecutionPolicy` interface
 - `src/resources/extensions/gsd/engine-resolver.ts` — new file with `ResolvedEngine` type and stub `resolveEngine()` function
+
+## Observability Impact
+
+- **New signal**: `resolveEngine()` throws a descriptive error (`"No engines registered — S02 provides DevWorkflowEngine"`) when called before implementations are registered. Any caller in the auto-loop that invokes this function will get a clear, actionable error message rather than a silent null or undefined.
+- **Inspection**: Future agents can verify the engine abstraction layer exists by importing `engine-resolver.ts` and calling `resolveEngine()` — a throw confirms S01 is in place but S02 hasn't landed yet. A successful return confirms an engine is registered.
+- **Failure visibility**: The leaf-node constraint on `engine-types.ts` (zero GSD imports) is enforced by contract tests in T02. If violated, the test names the exact constraint that broke.
+- **No runtime state changes**: This task creates only type declarations and a stub function. No existing runtime behavior is affected.
