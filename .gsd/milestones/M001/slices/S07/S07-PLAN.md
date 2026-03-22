@@ -18,7 +18,7 @@
 
 ## Tasks
 
-- [ ] **T01: Implement workflow subcommands and catalog registration** `est:45m`
+- [x] **T01: Implement workflow subcommands and catalog registration** `est:45m`
   - Why: No `/gsd workflow run|list|validate|pause|resume|new` commands exist. The existing `handleWorkflowCommand` handles dev workflow commands (queue, discuss, quick, etc.) — custom workflow commands need a new routing block at the top of this function.
   - Files: `src/resources/extensions/gsd/commands/handlers/workflow.ts`, `src/resources/extensions/gsd/commands/catalog.ts`, `src/resources/extensions/gsd/tests/commands-workflow-custom.test.ts`
   - Do: (1) Add `if (trimmed.startsWith("workflow "))` block at the top of `handleWorkflowCommand` that parses the subcommand and routes to handler functions. (2) Implement handlers: `run <name>` calls `createRun()` → `setActiveEngineId("custom")` → `setActiveRunDir(runDir)` → `startAuto()`; `list` calls `listRuns()` and formats output; `validate <name>` loads YAML and calls `validateDefinition()`; `pause` calls `pauseAuto()` when custom engine active; `resume` calls `startAuto()`; `new` returns a "use /skill create-workflow" message. (3) Add `workflow` to `TOP_LEVEL_SUBCOMMANDS` in catalog.ts. (4) Add `NESTED_COMPLETIONS["workflow"]` with all six subcommands. (5) Add definition-name completion for 3-part prefixes (`workflow run <partial>` and `workflow validate <partial>`) by scanning `.gsd/workflow-defs/*.yaml`. (6) Write test file with command handler tests (mock ctx.ui.notify, real temp dirs) and catalog completion tests.
@@ -40,3 +40,10 @@
 - `src/resources/extensions/gsd/dashboard-overlay.ts`
 - `src/resources/extensions/gsd/tests/commands-workflow-custom.test.ts`
 - `src/resources/extensions/gsd/tests/dashboard-custom-engine.test.ts`
+
+## Observability / Diagnostics
+
+- **Runtime signals:** Each workflow subcommand produces a `ctx.ui.notify()` call with success/failure/warning, making command outcomes visible in the TUI notification area. Error notifications include the underlying error message for diagnosis.
+- **Inspection surfaces:** Run directories at `.gsd/workflow-runs/<name>/<timestamp>/` contain human-readable DEFINITION.yaml, GRAPH.yaml, and PARAMS.json — all inspectable with `cat`/`less`. `listRuns()` returns structured metadata including step counts and status. `/gsd workflow list` renders this directly.
+- **Failure visibility:** Missing definitions, invalid YAML, validation errors, and engine state mismatches all produce specific error/warning messages (not silent failures). The `validate` subcommand surfaces all validation errors in a single notification.
+- **Redaction constraints:** No secrets or API keys flow through workflow subcommands. Parameter overrides are stored in PARAMS.json (plain key=value pairs). No redaction needed.

@@ -76,3 +76,9 @@ Add six `/gsd workflow` subcommands (`new`, `run`, `list`, `validate`, `pause`, 
 - `src/resources/extensions/gsd/commands/handlers/workflow.ts` — extended with custom workflow subcommand routing
 - `src/resources/extensions/gsd/commands/catalog.ts` — updated with workflow entry in TOP_LEVEL_SUBCOMMANDS and NESTED_COMPLETIONS
 - `src/resources/extensions/gsd/tests/commands-workflow-custom.test.ts` — new test file for command handlers and completions
+
+## Observability Impact
+
+- **New signals:** Each of the six subcommands produces a `ctx.ui.notify()` call with an appropriate level (info/warning/error), making command outcomes visible in the TUI. Error paths include the underlying exception message.
+- **Inspection:** A future agent can verify routing by calling `handleWorkflowCommand("workflow <sub>", mockCtx, mockPi)` and reading `ctx.notifications`. Catalog completions can be verified with `getGsdArgumentCompletions("workflow ")`.
+- **Failure visibility:** Missing definitions → error notification with path. Invalid YAML → error with parse message. No custom engine active → warning. Unknown subcommand → warning with full usage text. All failure states are observable through the notification array.
