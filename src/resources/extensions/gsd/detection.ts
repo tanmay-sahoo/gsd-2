@@ -434,13 +434,11 @@ export function detectProjectSignals(basePath: string): ProjectSignals {
     pushUnique(detectedFiles, "dep:fastapi");
   }
 
-  const springBootFiles = scannedFiles.filter((file) =>
-    file.endsWith("pom.xml") ||
-    file.endsWith("build.gradle") ||
-    file.endsWith("build.gradle.kts") ||
-    file.endsWith("libs.versions.toml"),
+  const springBootBuildFiles = scannedFiles.filter((file) =>
+    file.endsWith("pom.xml") || file.endsWith("build.gradle") || file.endsWith("build.gradle.kts"),
   );
-  if (containsDependencyMarker(basePath, springBootFiles, "spring-boot")) {
+  const springBootVersionCatalogs = scannedFiles.filter((file) => file.endsWith("libs.versions.toml"));
+  if (containsSpringBootMarker(basePath, springBootBuildFiles, springBootVersionCatalogs)) {
     pushUnique(detectedFiles, "dep:spring-boot");
   }
 
@@ -768,20 +766,68 @@ function matchesProjectFileMarker(scannedFile: string, marker: string): boolean 
   );
 }
 
-function containsDependencyMarker(basePath: string, relativePaths: string[], marker: "fastapi" | "spring-boot"): boolean {
+function containsDependencyMarker(basePath: string, relativePaths: string[], marker: "fastapi"): boolean {
   for (const relativePath of relativePaths) {
     try {
       const raw = readBounded(join(basePath, relativePath), 64 * 1024);
       const content = stripDependencyComments(relativePath, raw).toLowerCase();
-      if (marker === "fastapi" && /\bfastapi(?:[-_][a-z0-9]+)?\b/.test(content)) {
-        return true;
-      }
-      if (marker === "spring-boot" && /(org\.springframework\.boot|spring[-.]boot(?:[-.]starter)?)/.test(content)) {
+      if (marker === "fastapi" && /\bfastapi(?=$|[\s<=>\[\],;"'])/.test(content)) {
         return true;
       }
     } catch {
       // unreadable file — continue scanning other candidate files
     }
+  }
+
+  return false;
+}
+
+function containsSpringBootMarker(
+  basePath: string,
+  buildFiles: string[],
+  versionCatalogFiles: string[],
+): boolean {
+  const usedPluginAliases = new Set<string>();
+
+  for (const relativePath of buildFiles) {
+    try {
+      const raw = readBounded(join(basePath, relativePath), 64 * 1024);
+      const content = stripDependencyComments(relativePath, raw).toLowerCase();
+      if (/(org\.springframework\.boot|spring[-.]boot(?:[-.]starter)?)/.test(content)) {
+        return true;
+      }
+
+      const aliasRe = /alias\(\s*libs\.plugins\.([a-z0-9_.-]+)\s*\)/gi;
+      let match: RegExpExecArray | null;
+      while ((match = aliasRe.exec(content)) !== null) {
+        usedPluginAliases.add(normalizePluginAlias(match[1]));
+      }
+    } catch {
+      // unreadable build file — continue scanning others
+    }
+  }
+
+  if (usedPluginAliases.size === 0 || versionCatalogFiles.length === 0) {
+    return false;
+  }
+
+  const springBootAliases = new Set<string>();
+  for (const relativePath of versionCatalogFiles) {
+    try {
+      const raw = readBounded(join(basePath, relativePath), 64 * 1024);
+      const content = stripDependencyComments(relativePath, raw);
+      const aliasRe = /^\s*([A-Za-z0-9_.-]+)\s*=\s*\{[^\n}]*\bid\s*=\s*["']org\.springframework\.boot["'][^\n}]*\}/gm;
+      let match: RegExpExecArray | null;
+      while ((match = aliasRe.exec(content)) !== null) {
+        springBootAliases.add(normalizePluginAlias(match[1]));
+      }
+    } catch {
+      // unreadable version catalog — continue scanning others
+    }
+  }
+
+  for (const alias of usedPluginAliases) {
+    if (springBootAliases.has(alias)) return true;
   }
 
   return false;
@@ -794,6 +840,9 @@ function stripDependencyComments(relativePath: string, content: string): string 
   if (relativePath.endsWith("pyproject.toml")) {
     return content.replace(/(^|\s)#.*$/gm, "");
   }
+  if (relativePath.endsWith("libs.versions.toml")) {
+    return content.replace(/(^|\s)#.*$/gm, "");
+  }
   if (relativePath.endsWith("pom.xml")) {
     return content.replace(/<!--[\s\S]*?-->/g, "");
   }
@@ -803,6 +852,10 @@ function stripDependencyComments(relativePath: string, content: string): string 
       .replace(/\/\/.*$/gm, "");
   }
   return content;
+}
+
+function normalizePluginAlias(alias: string): string {
+  return alias.toLowerCase().replace(/[-_]/g, ".");
 }
 
 function scanProjectFiles(basePath: string): string[] {

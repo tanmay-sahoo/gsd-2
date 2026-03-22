@@ -804,6 +804,17 @@ test("detectProjectSignals: FastAPI inline comments do not trigger dep:fastapi",
   }
 });
 
+test("detectProjectSignals: fastapi-* packages do not trigger dep:fastapi without fastapi itself", () => {
+  const dir = makeTempDir("signals-fastapi-suffix-only");
+  try {
+    writeFileSync(join(dir, "requirements.txt"), "fastapi-users==13.0\n", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(!signals.detectedFiles.includes("dep:fastapi"), "fastapi-* packages alone should not imply FastAPI framework usage");
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test("detectProjectSignals: Django project does NOT get dep:fastapi marker", () => {
   const dir = makeTempDir("signals-django-no-fastapi");
   try {
@@ -899,14 +910,48 @@ test("detectProjectSignals: Spring Boot version-catalog alias emits dep:spring-b
   const dir = makeTempDir("signals-spring-version-catalog");
   try {
     mkdirSync(join(dir, "gradle"), { recursive: true });
-    writeFileSync(join(dir, "build.gradle.kts"), "plugins { alias(libs.plugins.spring.boot) }", "utf-8");
+    writeFileSync(join(dir, "build.gradle.kts"), "plugins { alias(libs.plugins.backend.web) }", "utf-8");
     writeFileSync(
       join(dir, "gradle", "libs.versions.toml"),
-      "[plugins]\nspring-boot = { id = 'org.springframework.boot', version = '3.2.0' }\n",
+      "[plugins]\nbackend-web = { id = 'org.springframework.boot', version = '3.2.0' }\n",
       "utf-8",
     );
     const signals = detectProjectSignals(dir);
     assert.ok(signals.detectedFiles.includes("dep:spring-boot"), "should detect Spring Boot via version-catalog alias");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: commented Spring Boot alias in libs.versions.toml does not emit dep:spring-boot", () => {
+  const dir = makeTempDir("signals-spring-version-catalog-comment");
+  try {
+    mkdirSync(join(dir, "gradle"), { recursive: true });
+    writeFileSync(join(dir, "build.gradle.kts"), "plugins { alias(libs.plugins.backend.web) }", "utf-8");
+    writeFileSync(
+      join(dir, "gradle", "libs.versions.toml"),
+      "[plugins]\n# backend-web = { id = 'org.springframework.boot', version = '3.2.0' }\n",
+      "utf-8",
+    );
+    const signals = detectProjectSignals(dir);
+    assert.ok(!signals.detectedFiles.includes("dep:spring-boot"), "commented aliases should not trigger Spring Boot detection");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: unused Spring Boot alias in libs.versions.toml does not emit dep:spring-boot", () => {
+  const dir = makeTempDir("signals-spring-version-catalog-unused");
+  try {
+    mkdirSync(join(dir, "gradle"), { recursive: true });
+    writeFileSync(join(dir, "build.gradle.kts"), "plugins { alias(libs.plugins.backend.web) }", "utf-8");
+    writeFileSync(
+      join(dir, "gradle", "libs.versions.toml"),
+      "[plugins]\nother-plugin = { id = 'org.springframework.boot', version = '3.2.0' }\n",
+      "utf-8",
+    );
+    const signals = detectProjectSignals(dir);
+    assert.ok(!signals.detectedFiles.includes("dep:spring-boot"), "unused Spring Boot aliases should not trigger detection");
   } finally {
     cleanup(dir);
   }
