@@ -57,6 +57,12 @@ Write comprehensive tests in `definition-loader.test.ts` covering all validation
 - [ ] All imports use `.js` extension for ESM compatibility
 - [ ] File imports only `yaml` and `node:` builtins — no GSD module imports
 
+## Observability Impact
+
+- **New signal:** `validateDefinition()` error array now includes four additional error types: duplicate step IDs, dangling dependencies, self-referencing dependencies, and cycle paths. Callers that log validation errors will see these automatically.
+- **Inspection:** Future agents can call `validateDefinition(parsedYaml)` on any YAML object and inspect `errors[]` to diagnose malformed workflow definitions without loading from disk.
+- **Failure visibility:** Cycle detection includes the full cycle path in the error message (`A → B → C → A`), making it immediately clear which steps are involved. Path traversal errors include the offending value.
+
 ## Verification
 
 - `node --experimental-strip-types --test src/resources/extensions/gsd/tests/definition-loader.test.ts` — all tests pass (30+ tests)
