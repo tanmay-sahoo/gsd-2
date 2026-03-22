@@ -535,3 +535,135 @@ test("detectProjectSignals: Terraform project via main.tf", () => {
     cleanup(dir);
   }
 });
+
+// ── QA4/QA5 — new detection tests ──────────────────────────────────────────
+
+test("detectProjectSignals: Vue.js via .vue files in src/", () => {
+  const dir = makeTempDir("signals-vue");
+  try {
+    writeFileSync(join(dir, "package.json"), '{"name":"vue-app"}', "utf-8");
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "App.vue"), "<template></template>", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("*.vue"), "should add *.vue synthetic marker");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: Vue CLI via vue.config.js", () => {
+  const dir = makeTempDir("signals-vue-cli");
+  try {
+    writeFileSync(join(dir, "package.json"), '{"name":"vue-cli-app"}', "utf-8");
+    writeFileSync(join(dir, "vue.config.js"), "module.exports = {};", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("vue.config.js"));
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: requirements.txt sets Python language", () => {
+  const dir = makeTempDir("signals-requirements");
+  try {
+    writeFileSync(join(dir, "requirements.txt"), "flask==3.0\n", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("requirements.txt"));
+    assert.equal(signals.primaryLanguage, "python");
+    assert.ok(signals.verificationCommands.includes("pytest"), "should suggest pytest for requirements.txt projects");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: Android project via app/build.gradle", () => {
+  const dir = makeTempDir("signals-android");
+  try {
+    mkdirSync(join(dir, "app"), { recursive: true });
+    writeFileSync(join(dir, "app", "build.gradle"), "apply plugin: 'com.android.application'", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("app/build.gradle"));
+    assert.equal(signals.primaryLanguage, "java/kotlin");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: Unity project via ProjectSettings/ProjectVersion.txt", () => {
+  const dir = makeTempDir("signals-unity");
+  try {
+    mkdirSync(join(dir, "ProjectSettings"), { recursive: true });
+    writeFileSync(join(dir, "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 2022.3", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("ProjectSettings/ProjectVersion.txt"));
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: Godot project via project.godot", () => {
+  const dir = makeTempDir("signals-godot");
+  try {
+    writeFileSync(join(dir, "project.godot"), "[application]", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("project.godot"));
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: Airflow via airflow.cfg", () => {
+  const dir = makeTempDir("signals-airflow");
+  try {
+    writeFileSync(join(dir, "airflow.cfg"), "[core]\ndags_folder = ./dags", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("airflow.cfg"));
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: Kubernetes via Chart.yaml (Helm)", () => {
+  const dir = makeTempDir("signals-k8s");
+  try {
+    writeFileSync(join(dir, "Chart.yaml"), "apiVersion: v2\nname: my-chart", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("Chart.yaml"));
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: Blockchain via hardhat.config.ts", () => {
+  const dir = makeTempDir("signals-blockchain");
+  try {
+    writeFileSync(join(dir, "hardhat.config.ts"), 'import "@nomiclabs/hardhat-ethers"', "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("hardhat.config.ts"));
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: CI/CD via .github/workflows", () => {
+  const dir = makeTempDir("signals-cicd");
+  try {
+    mkdirSync(join(dir, ".github", "workflows"), { recursive: true });
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes(".github/workflows"));
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: Tailwind via tailwind.config.ts", () => {
+  const dir = makeTempDir("signals-tailwind");
+  try {
+    writeFileSync(join(dir, "package.json"), '{"name":"tw-app"}', "utf-8");
+    writeFileSync(join(dir, "tailwind.config.ts"), "export default {};", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("tailwind.config.ts"));
+  } finally {
+    cleanup(dir);
+  }
+});

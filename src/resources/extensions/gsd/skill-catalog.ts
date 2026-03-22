@@ -400,7 +400,6 @@ export const SKILL_CATALOG: SkillPack[] = [
     description: "Production-ready FastAPI projects with async patterns and error handling",
     repo: "wshobson/agents",
     skills: ["fastapi-templates"],
-    matchLanguages: ["python"],
     matchFiles: ["pyproject.toml", "setup.py", "requirements.txt"],
   },
   // ── Go ────────────────────────────────────────────────────────────────────
@@ -779,6 +778,12 @@ export const GREENFIELD_STACKS: Array<{
     label: "Django",
     description: "Django models, views, middleware, and Celery",
     packs: ["Django", "Python", "Python Advanced"],
+  },
+  {
+    id: "fastapi",
+    label: "FastAPI",
+    description: "FastAPI web APIs with async patterns",
+    packs: ["FastAPI", "Python", "Python Advanced"],
   },
   {
     id: "android",

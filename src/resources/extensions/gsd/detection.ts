@@ -587,7 +587,7 @@ function detectVerificationCommands(
     commands.push("go vet ./...");
   }
 
-  if (detectedFiles.includes("pyproject.toml") || detectedFiles.includes("setup.py")) {
+  if (detectedFiles.includes("pyproject.toml") || detectedFiles.includes("setup.py") || detectedFiles.includes("requirements.txt")) {
     commands.push("pytest");
   }
 
