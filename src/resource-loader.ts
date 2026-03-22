@@ -454,6 +454,7 @@ function migrateSkillsToEcosystemDir(agentDir: string): void {
 
     const entries = readdirSync(legacyDir, { withFileTypes: true })
     let migrated = 0
+    let candidates = 0
     for (const entry of entries) {
       // Handle both real directories and symlinks pointing to directories
       const isDir = entry.isDirectory()
@@ -478,6 +479,7 @@ function migrateSkillsToEcosystemDir(agentDir: string): void {
       const target = join(ecosystemDir, entry.name)
       if (existsSync(target)) continue // ecosystem version wins
 
+      candidates++
       try {
         if (isSymlink) {
           // Recreate the symlink in the ecosystem directory
@@ -490,6 +492,14 @@ function migrateSkillsToEcosystemDir(agentDir: string): void {
       } catch {
         // non-fatal — skip this skill
       }
+    }
+
+    // If there were skills to migrate but ALL copies failed, remove the marker
+    // so migration retries on the next launch. Keeps the legacy dir as fallback.
+    if (candidates > 0 && migrated === 0) {
+      try { closeSync(markerFd); markerFd = -1 } catch { /* non-fatal */ }
+      try { unlinkSync(markerPath) } catch { /* non-fatal */ }
+      return
     }
 
     // Write migration info to the marker
