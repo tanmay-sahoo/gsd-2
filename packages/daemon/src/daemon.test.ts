@@ -4,9 +4,13 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'no
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { execFileSync, spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 import { resolveConfigPath, loadConfig, validateConfig } from './config.js';
 import { Logger } from './logger.js';
-import type { LogEntry } from './types.js';
+import { Daemon } from './daemon.js';
+import type { DaemonConfig, LogEntry } from './types.js';
 
 // ---------- helpers ----------
 
@@ -319,6 +323,201 @@ describe('token safety', () => {
     } finally {
       if (prev === undefined) delete process.env['DISCORD_BOT_TOKEN'];
       else process.env['DISCORD_BOT_TOKEN'] = prev;
+    }
+  });
+});
+
+// ---------- daemon lifecycle ----------
+
+// Resolve the dist/ directory for spawning CLI
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+describe('Daemon', () => {
+  it('logs lifecycle events on start and shutdown', async () => {
+    const dir = tmpDir();
+    cleanupDirs.push(dir);
+    const logPath = join(dir, 'daemon-lifecycle.log');
+
+    const config: DaemonConfig = {
+      discord: undefined,
+      projects: { scan_roots: ['/a', '/b'] },
+      log: { file: logPath, level: 'info', max_size_mb: 50 },
+    };
+
+    const logger = new Logger({ filePath: logPath, level: 'info' });
+    const daemon = new Daemon(config, logger);
+
+    await daemon.start();
+
+    // start() should have logged 'daemon started'
+    // shutdown() directly — we override process.exit to prevent test runner from dying
+    const origExit = process.exit;
+    let exitCode: number | undefined;
+    // @ts-expect-error — overriding process.exit for test
+    process.exit = (code?: number) => { exitCode = code ?? 0; };
+    try {
+      await daemon.shutdown();
+    } finally {
+      process.exit = origExit;
+    }
+
+    assert.equal(exitCode, 0);
+
+    const content = readFileSync(logPath, 'utf-8');
+    const lines = content.trim().split('\n');
+
+    // First line: daemon started
+    const startEntry: LogEntry = JSON.parse(lines[0]!);
+    assert.equal(startEntry.msg, 'daemon started');
+    assert.equal(startEntry.data?.scan_roots, 2);
+    assert.equal(startEntry.data?.discord_configured, false);
+
+    // Second line: daemon shutting down
+    const stopEntry: LogEntry = JSON.parse(lines[1]!);
+    assert.equal(stopEntry.msg, 'daemon shutting down');
+  });
+
+  it('shutdown is idempotent — second call is a no-op', async () => {
+    const dir = tmpDir();
+    cleanupDirs.push(dir);
+    const logPath = join(dir, 'idempotent.log');
+
+    const config: DaemonConfig = {
+      discord: undefined,
+      projects: { scan_roots: [] },
+      log: { file: logPath, level: 'info', max_size_mb: 50 },
+    };
+
+    const logger = new Logger({ filePath: logPath, level: 'info' });
+    const daemon = new Daemon(config, logger);
+
+    await daemon.start();
+
+    const origExit = process.exit;
+    let exitCount = 0;
+    // @ts-expect-error — overriding process.exit for test
+    process.exit = () => { exitCount++; };
+    try {
+      await daemon.shutdown();
+      await daemon.shutdown(); // second call — should be no-op
+    } finally {
+      process.exit = origExit;
+    }
+
+    assert.equal(exitCount, 1, 'process.exit should be called exactly once');
+
+    const lines = readFileSync(logPath, 'utf-8').trim().split('\n');
+    const shutdownLines = lines.filter(l => {
+      const e: LogEntry = JSON.parse(l);
+      return e.msg === 'daemon shutting down';
+    });
+    assert.equal(shutdownLines.length, 1, 'shutdown log should appear exactly once');
+  });
+});
+
+// ---------- CLI integration ----------
+
+describe('CLI integration', () => {
+  it('--help prints usage and exits 0', () => {
+    const result = execFileSync(
+      process.execPath,
+      [join(__dirname, 'cli.js'), '--help'],
+      { encoding: 'utf-8', timeout: 5000 },
+    );
+    assert.ok(result.includes('Usage: gsd-daemon'));
+    assert.ok(result.includes('--config'));
+    assert.ok(result.includes('--verbose'));
+  });
+
+  it('starts, logs to file, and exits cleanly on SIGTERM', { timeout: 15000 }, async () => {
+    const dir = tmpDir();
+    cleanupDirs.push(dir);
+    const logPath = join(dir, 'integration.log');
+    const configPath = join(dir, 'daemon.yaml');
+
+    writeFileSync(configPath, `
+projects:
+  scan_roots:
+    - /tmp/test-project
+log:
+  file: "${logPath}"
+  level: info
+  max_size_mb: 10
+`);
+
+    // Use execFile with a wrapper script approach: spawn, wait for start, SIGTERM, verify
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        [join(__dirname, 'cli.js'), '--config', configPath],
+        { stdio: 'ignore' },
+      );
+
+      let resolved = false;
+      child.on('error', (err) => { if (!resolved) { resolved = true; reject(err); } });
+      child.on('exit', (code) => { if (!resolved) { resolved = true; resolve(code ?? 1); } });
+
+      // Poll for startup, then send SIGTERM
+      const poll = setInterval(() => {
+        if (existsSync(logPath)) {
+          const content = readFileSync(logPath, 'utf-8');
+          if (content.includes('daemon started')) {
+            clearInterval(poll);
+            child.kill('SIGTERM');
+          }
+        }
+      }, 100);
+
+      // Safety: kill child if it takes too long
+      setTimeout(() => {
+        clearInterval(poll);
+        if (!resolved) {
+          child.kill('SIGKILL');
+          resolved = true;
+          reject(new Error('timed out waiting for daemon'));
+        }
+      }, 10000);
+    });
+
+    assert.equal(exitCode, 0, 'daemon should exit with code 0 on SIGTERM');
+
+    // Small delay for filesystem flush
+    await new Promise(r => setTimeout(r, 100));
+
+    // Verify log file contents
+    const finalContent = readFileSync(logPath, 'utf-8');
+    assert.ok(finalContent.includes('daemon started'), 'log should contain startup entry');
+    assert.ok(finalContent.includes('daemon shutting down'), 'log should contain shutdown entry');
+
+    // Verify log entries are valid JSON-lines
+    const lines = finalContent.trim().split('\n');
+    for (const line of lines) {
+      const entry: LogEntry = JSON.parse(line);
+      assert.ok(entry.ts, 'each entry should have a timestamp');
+      assert.ok(entry.level, 'each entry should have a level');
+      assert.ok(entry.msg, 'each entry should have a message');
+    }
+  });
+
+  it('exits with code 1 on invalid config', () => {
+    const dir = tmpDir();
+    cleanupDirs.push(dir);
+    const configPath = join(dir, 'bad.yaml');
+    writeFileSync(configPath, ':\n  :\n    bad: [unclosed');
+
+    try {
+      execFileSync(
+        process.execPath,
+        [join(__dirname, 'cli.js'), '--config', configPath],
+        { encoding: 'utf-8', timeout: 5000 },
+      );
+      assert.fail('should have thrown');
+    } catch (err: unknown) {
+      // execFileSync throws on non-zero exit
+      const execErr = err as { status: number; stderr: string };
+      assert.equal(execErr.status, 1);
+      assert.ok(execErr.stderr.includes('fatal'));
     }
   });
 });
