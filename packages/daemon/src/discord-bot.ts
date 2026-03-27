@@ -10,10 +10,14 @@ import {
   Client,
   GatewayIntentBits,
   REST,
+  StringSelectMenuBuilder,
+  ActionRowBuilder,
+  ComponentType,
   type Interaction,
   type Guild,
+  type StringSelectMenuInteraction,
 } from 'discord.js';
-import type { DaemonConfig, VerbosityLevel } from './types.js';
+import type { DaemonConfig, VerbosityLevel, ProjectInfo } from './types.js';
 import type { Logger } from './logger.js';
 import type { SessionManager } from './session-manager.js';
 import { ChannelManager } from './channel-manager.js';
@@ -62,6 +66,8 @@ export interface DiscordBotOptions {
   config: NonNullable<DaemonConfig['discord']>;
   logger: Logger;
   sessionManager: SessionManager;
+  /** Optional function to scan for projects (passed from Daemon). */
+  scanProjects?: () => Promise<ProjectInfo[]>;
 }
 
 export class DiscordBot {
@@ -73,11 +79,13 @@ export class DiscordBot {
   private readonly config: NonNullable<DaemonConfig['discord']>;
   private readonly logger: Logger;
   private readonly sessionManager: SessionManager;
+  private readonly scanProjects?: () => Promise<ProjectInfo[]>;
 
   constructor(opts: DiscordBotOptions) {
     this.config = opts.config;
     this.logger = opts.logger;
     this.sessionManager = opts.sessionManager;
+    this.scanProjects = opts.scanProjects;
   }
 
   /**
@@ -223,9 +231,15 @@ export class DiscordBot {
         break;
       }
       case 'gsd-start':
+        this.handleGsdStart(interaction).catch((err) => {
+          this.logger.warn('gsd-start handler error', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+        break;
       case 'gsd-stop':
-        interaction.reply({ content: 'Coming soon — use #gsd-control', ephemeral: true }).catch((err) => {
-          this.logger.warn(`${commandName} reply failed`, {
+        this.handleGsdStop(interaction).catch((err) => {
+          this.logger.warn('gsd-stop handler error', {
             error: err instanceof Error ? err.message : String(err),
           });
         });
@@ -256,6 +270,152 @@ export class DiscordBot {
           });
         });
         break;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private: /gsd-start handler
+  // ---------------------------------------------------------------------------
+
+  private async handleGsdStart(interaction: import('discord.js').ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    this.logger.info('gsd-start: scanning projects');
+
+    if (!this.scanProjects) {
+      await interaction.editReply({ content: 'Project scanning not available.' });
+      return;
+    }
+
+    let projects: ProjectInfo[];
+    try {
+      projects = await this.scanProjects();
+    } catch (err) {
+      this.logger.error('gsd-start: scan failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await interaction.editReply({ content: 'Failed to scan for projects.' });
+      return;
+    }
+
+    if (projects.length === 0) {
+      await interaction.editReply({ content: 'No projects found.' });
+      return;
+    }
+
+    // Discord select menus support max 25 options
+    const truncated = projects.slice(0, 25);
+    const select = new StringSelectMenuBuilder()
+      .setCustomId('gsd-start-select')
+      .setPlaceholder('Select a project to start')
+      .addOptions(
+        truncated.map((p) => ({
+          label: p.name.slice(0, 100), // Discord label max 100 chars
+          value: p.path,
+          description: p.markers.join(', ').slice(0, 100) || undefined,
+        })),
+      );
+
+    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
+    const reply = await interaction.editReply({
+      content: `Select a project to start (${truncated.length}${projects.length > 25 ? ` of ${projects.length}` : ''} projects):`,
+      components: [row],
+    });
+
+    try {
+      const collected = await reply.awaitMessageComponent({
+        componentType: ComponentType.StringSelect,
+        time: 60_000,
+        filter: (i) => i.user.id === interaction.user.id,
+      }) as StringSelectMenuInteraction;
+
+      const projectPath = collected.values[0];
+      this.logger.info('gsd-start: project selected', { projectPath });
+
+      try {
+        const sessionId = await this.sessionManager.startSession({ projectDir: projectPath });
+        await collected.update({
+          content: `✅ Session started for **${projectPath}** (ID: \`${sessionId}\`)`,
+          components: [],
+        });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        this.logger.error('gsd-start: startSession failed', { error: errMsg, projectPath });
+        await collected.update({
+          content: `❌ Failed to start session: ${errMsg}`,
+          components: [],
+        });
+      }
+    } catch {
+      // Timeout or other collector error
+      this.logger.info('gsd-start: selection timed out');
+      await interaction.editReply({ content: 'Selection timed out.', components: [] });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private: /gsd-stop handler
+  // ---------------------------------------------------------------------------
+
+  private async handleGsdStop(interaction: import('discord.js').ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply({ ephemeral: true });
+    this.logger.info('gsd-stop: listing sessions');
+
+    const allSessions = this.sessionManager.getAllSessions();
+    const activeSessions = allSessions.filter(
+      (s) => s.status === 'running' || s.status === 'blocked' || s.status === 'starting',
+    );
+
+    if (activeSessions.length === 0) {
+      await interaction.editReply({ content: 'No active sessions.' });
+      return;
+    }
+
+    // Discord select menus support max 25 options
+    const truncated = activeSessions.slice(0, 25);
+    const select = new StringSelectMenuBuilder()
+      .setCustomId('gsd-stop-select')
+      .setPlaceholder('Select a session to stop')
+      .addOptions(
+        truncated.map((s) => ({
+          label: `${s.projectName} (${s.status})`.slice(0, 100),
+          value: s.sessionId,
+        })),
+      );
+
+    const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
+    const reply = await interaction.editReply({
+      content: `Select a session to stop (${truncated.length} active):`,
+      components: [row],
+    });
+
+    try {
+      const collected = await reply.awaitMessageComponent({
+        componentType: ComponentType.StringSelect,
+        time: 60_000,
+        filter: (i) => i.user.id === interaction.user.id,
+      }) as StringSelectMenuInteraction;
+
+      const sessionId = collected.values[0];
+      this.logger.info('gsd-stop: session selected', { sessionId });
+
+      try {
+        await this.sessionManager.cancelSession(sessionId);
+        await collected.update({
+          content: `✅ Session \`${sessionId}\` stopped.`,
+          components: [],
+        });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        this.logger.error('gsd-stop: cancelSession failed', { error: errMsg, sessionId });
+        await collected.update({
+          content: `❌ Failed to stop session: ${errMsg}`,
+          components: [],
+        });
+      }
+    } catch {
+      // Timeout or other collector error
+      this.logger.info('gsd-stop: selection timed out');
+      await interaction.editReply({ content: 'Selection timed out.', components: [] });
     }
   }
 }

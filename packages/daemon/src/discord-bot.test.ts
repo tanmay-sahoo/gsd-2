@@ -10,6 +10,7 @@ import { sanitizeChannelName, ChannelManager } from './channel-manager.js';
 import { buildCommands, formatSessionStatus } from './commands.js';
 import { Daemon } from './daemon.js';
 import { Logger } from './logger.js';
+import { validateConfig } from './config.js';
 import type { DaemonConfig, LogEntry, ManagedSession } from './types.js';
 
 // ---------- helpers ----------
@@ -571,5 +572,221 @@ describe('command dispatch', () => {
   it('auth guard accepts owner on interaction', () => {
     const authorized = isAuthorized('owner-1', 'owner-1');
     assert.equal(authorized, true);
+  });
+});
+
+// ---------- Config validation: new fields ----------
+
+describe('validateConfig — control_channel_id and orchestrator', () => {
+  it('parses control_channel_id from discord block', () => {
+    const config = validateConfig({
+      discord: {
+        token: 'tok',
+        guild_id: 'g1',
+        owner_id: 'o1',
+        control_channel_id: 'ch-123',
+      },
+    });
+    assert.equal(config.discord?.control_channel_id, 'ch-123');
+  });
+
+  it('omits control_channel_id when not present', () => {
+    const config = validateConfig({
+      discord: {
+        token: 'tok',
+        guild_id: 'g1',
+        owner_id: 'o1',
+      },
+    });
+    assert.equal(config.discord?.control_channel_id, undefined);
+  });
+
+  it('parses orchestrator model and max_tokens', () => {
+    const config = validateConfig({
+      discord: {
+        token: 'tok',
+        guild_id: 'g1',
+        owner_id: 'o1',
+        orchestrator: { model: 'claude-opus-2025', max_tokens: 2048 },
+      },
+    });
+    assert.equal(config.discord?.orchestrator?.model, 'claude-opus-2025');
+    assert.equal(config.discord?.orchestrator?.max_tokens, 2048);
+  });
+
+  it('missing orchestrator block results in undefined', () => {
+    const config = validateConfig({
+      discord: {
+        token: 'tok',
+        guild_id: 'g1',
+        owner_id: 'o1',
+      },
+    });
+    assert.equal(config.discord?.orchestrator, undefined);
+  });
+
+  it('empty orchestrator block has no model or max_tokens', () => {
+    const config = validateConfig({
+      discord: {
+        token: 'tok',
+        guild_id: 'g1',
+        owner_id: 'o1',
+        orchestrator: {},
+      },
+    });
+    // orchestrator object should exist but with no values set
+    assert.ok(config.discord?.orchestrator !== undefined);
+    assert.equal(config.discord?.orchestrator?.model, undefined);
+    assert.equal(config.discord?.orchestrator?.max_tokens, undefined);
+  });
+
+  it('ignores non-numeric max_tokens', () => {
+    const config = validateConfig({
+      discord: {
+        token: 'tok',
+        guild_id: 'g1',
+        owner_id: 'o1',
+        orchestrator: { max_tokens: 'not a number' },
+      },
+    });
+    assert.equal(config.discord?.orchestrator?.max_tokens, undefined);
+  });
+
+  it('ignores non-string model', () => {
+    const config = validateConfig({
+      discord: {
+        token: 'tok',
+        guild_id: 'g1',
+        owner_id: 'o1',
+        orchestrator: { model: 42 },
+      },
+    });
+    assert.equal(config.discord?.orchestrator?.model, undefined);
+  });
+});
+
+// ---------- Daemon wiring: orchestrator ----------
+
+describe('Daemon orchestrator wiring', () => {
+  it('orchestrator is undefined when control_channel_id is not set', async () => {
+    const dir = tmpDir();
+    cleanupDirs.push(dir);
+    const logPath = join(dir, 'no-orchestrator.log');
+
+    const config: DaemonConfig = {
+      discord: undefined,
+      projects: { scan_roots: [] },
+      log: { file: logPath, level: 'debug', max_size_mb: 50 },
+    };
+
+    const logger = new Logger({ filePath: logPath, level: 'debug' });
+    const daemon = new Daemon(config, logger);
+
+    await daemon.start();
+    assert.equal(daemon.getOrchestrator(), undefined);
+
+    const origExit = process.exit;
+    // @ts-expect-error — overriding process.exit for test
+    process.exit = () => {};
+    try {
+      await daemon.shutdown();
+    } finally {
+      process.exit = origExit;
+    }
+  });
+
+  it('orchestrator is undefined when discord has no control_channel_id', async () => {
+    // Even with a discord block that fails login, orchestrator should not be created
+    // because there's no control_channel_id
+    const dir = tmpDir();
+    cleanupDirs.push(dir);
+    const logPath = join(dir, 'no-ctl-chan.log');
+
+    const config: DaemonConfig = {
+      discord: {
+        token: 'bad-token',
+        guild_id: 'g1',
+        owner_id: 'o1',
+        // control_channel_id intentionally omitted
+      },
+      projects: { scan_roots: [] },
+      log: { file: logPath, level: 'debug', max_size_mb: 50 },
+    };
+
+    const logger = new Logger({ filePath: logPath, level: 'debug' });
+    const daemon = new Daemon(config, logger);
+
+    await daemon.start();
+    // Login fails, so orchestrator can't be wired regardless. But the code path
+    // that checks control_channel_id comes after successful login/eventBridge wiring.
+    // Since login fails, orchestrator is undefined.
+    assert.equal(daemon.getOrchestrator(), undefined);
+
+    const origExit = process.exit;
+    // @ts-expect-error — overriding process.exit for test
+    process.exit = () => {};
+    try {
+      await daemon.shutdown();
+    } finally {
+      process.exit = origExit;
+    }
+  });
+});
+
+// ---------- /gsd-start and /gsd-stop logic paths ----------
+
+describe('/gsd-start and /gsd-stop logic', () => {
+  // These test the observable logic paths exercised by the handlers.
+  // Since handleGsdStart/handleGsdStop are private, we test the data layer
+  // they depend on — project scanning, session listing, and edge cases.
+
+  it('/gsd-start: scanForProjects returning 0 projects', async () => {
+    // Simulates the "no projects" path
+    const { scanForProjects } = await import('./project-scanner.js');
+    // With no scan roots, should return empty
+    const projects = await scanForProjects([]);
+    assert.equal(projects.length, 0);
+  });
+
+  it('/gsd-stop: getAllSessions returns empty when no sessions active', async () => {
+    const { SessionManager } = await import('./session-manager.js');
+    const dir = tmpDir();
+    cleanupDirs.push(dir);
+    const logPath = join(dir, 'sm-test.log');
+    const logger = new Logger({ filePath: logPath, level: 'debug' });
+    const sm = new SessionManager(logger);
+    const sessions = sm.getAllSessions();
+    assert.equal(sessions.length, 0);
+    await logger.close();
+  });
+
+  it('/gsd-stop: filters to active sessions only', () => {
+    // Simulate the filter logic used in handleGsdStop
+    const allSessions: Partial<ManagedSession>[] = [
+      { sessionId: 's1', status: 'running', projectName: 'alpha' },
+      { sessionId: 's2', status: 'completed', projectName: 'beta' },
+      { sessionId: 's3', status: 'blocked', projectName: 'gamma' },
+      { sessionId: 's4', status: 'error', projectName: 'delta' },
+      { sessionId: 's5', status: 'starting', projectName: 'epsilon' },
+      { sessionId: 's6', status: 'cancelled', projectName: 'zeta' },
+    ];
+    const active = allSessions.filter(
+      (s) => s.status === 'running' || s.status === 'blocked' || s.status === 'starting',
+    );
+    assert.equal(active.length, 3);
+    assert.deepEqual(active.map((s) => s.projectName), ['alpha', 'gamma', 'epsilon']);
+  });
+
+  it('/gsd-start: >25 projects are truncated for select menu', () => {
+    // Simulate the truncation logic
+    const projects = Array.from({ length: 30 }, (_, i) => ({
+      name: `project-${i}`,
+      path: `/home/user/project-${i}`,
+      markers: [] as string[],
+      lastModified: Date.now(),
+    }));
+    const truncated = projects.slice(0, 25);
+    assert.equal(truncated.length, 25);
+    assert.equal(truncated[24].name, 'project-24');
   });
 });

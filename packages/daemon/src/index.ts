@@ -26,6 +26,8 @@ export type { ChannelManagerOptions } from './channel-manager.js';
 export { buildCommands, formatSessionStatus, registerGuildCommands } from './commands.js';
 export { EventBridge } from './event-bridge.js';
 export type { BridgeClient, EventBridgeOptions } from './event-bridge.js';
+export { Orchestrator } from './orchestrator.js';
+export type { OrchestratorConfig, OrchestratorDeps, DiscordMessageLike } from './orchestrator.js';
 export { MessageBatcher } from './message-batcher.js';
 export type { SendPayload, SendFn, BatcherLogger, BatcherOptions } from './message-batcher.js';
 export { VerbosityManager, shouldShowAtLevel } from './verbosity.js';

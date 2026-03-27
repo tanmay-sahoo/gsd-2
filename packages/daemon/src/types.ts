@@ -34,6 +34,13 @@ export interface DaemonConfig {
     owner_id: string;
     /** When true, DM the owner on blocker events in addition to channel messages */
     dm_on_blocker?: boolean;
+    /** Discord channel ID where the orchestrator listens for natural language commands */
+    control_channel_id?: string;
+    /** LLM orchestrator settings */
+    orchestrator?: {
+      model?: string;
+      max_tokens?: number;
+    };
   };
   projects: {
     scan_roots: string[];

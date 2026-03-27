@@ -4,6 +4,7 @@ import { SessionManager } from './session-manager.js';
 import { scanForProjects } from './project-scanner.js';
 import { DiscordBot, validateDiscordConfig } from './discord-bot.js';
 import { EventBridge } from './event-bridge.js';
+import { Orchestrator } from './orchestrator.js';
 
 /**
  * Core daemon class — ties config + logger together with lifecycle management.
@@ -17,6 +18,7 @@ export class Daemon {
   private sessionManager: SessionManager | undefined;
   private discordBot: DiscordBot | undefined;
   private eventBridge: EventBridge | undefined;
+  private orchestrator: Orchestrator | undefined;
 
   constructor(
     private readonly config: DaemonConfig,
@@ -51,6 +53,7 @@ export class Daemon {
           config: this.config.discord,
           logger: this.logger,
           sessionManager: this.sessionManager,
+          scanProjects: () => this.scanProjects(),
         });
         await this.discordBot.login();
 
@@ -69,6 +72,28 @@ export class Daemon {
           this.discordBot.setEventBridge(this.eventBridge);
           this.eventBridge.start();
           this.logger.info('event bridge wired');
+
+          // Wire up Orchestrator if control_channel_id is configured
+          if (this.config.discord.control_channel_id) {
+            this.orchestrator = new Orchestrator({
+              sessionManager: this.sessionManager,
+              channelManager,
+              scanProjects: () => this.scanProjects(),
+              config: {
+                model: this.config.discord.orchestrator?.model ?? 'claude-sonnet-4-5-20250929',
+                max_tokens: this.config.discord.orchestrator?.max_tokens ?? 1024,
+                control_channel_id: this.config.discord.control_channel_id,
+              },
+              logger: this.logger,
+              ownerId: this.config.discord.owner_id,
+            });
+            client.on('messageCreate', (message) => {
+              void this.orchestrator!.handleMessage(message);
+            });
+            this.logger.info('orchestrator wired', {
+              control_channel_id: this.config.discord.control_channel_id,
+            });
+          }
         } else {
           this.logger.warn('event bridge skipped — channel manager or client not available');
         }
@@ -100,6 +125,11 @@ export class Daemon {
     return this.eventBridge;
   }
 
+  /** Accessor for the orchestrator (available after start() with control_channel_id configured). */
+  getOrchestrator(): Orchestrator | undefined {
+    return this.orchestrator;
+  }
+
   /** Idempotent shutdown: log, cleanup sessions, close logger, exit. */
   async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
@@ -115,6 +145,12 @@ export class Daemon {
     if (this.keepaliveTimer) {
       clearInterval(this.keepaliveTimer);
       this.keepaliveTimer = undefined;
+    }
+
+    // Stop Orchestrator first
+    if (this.orchestrator) {
+      this.orchestrator.stop();
+      this.orchestrator = undefined;
     }
 
     // Stop EventBridge before Discord bot destroy

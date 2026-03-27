@@ -57,7 +57,17 @@ export function validateConfig(raw: unknown): DaemonConfig {
       guild_id: typeof d['guild_id'] === 'string' ? d['guild_id'] : '',
       owner_id: typeof d['owner_id'] === 'string' ? d['owner_id'] : '',
       ...(typeof d['dm_on_blocker'] === 'boolean' ? { dm_on_blocker: d['dm_on_blocker'] } : {}),
+      ...(typeof d['control_channel_id'] === 'string' ? { control_channel_id: d['control_channel_id'] } : {}),
     };
+
+    // Parse orchestrator sub-block
+    if (d['orchestrator'] != null && typeof d['orchestrator'] === 'object') {
+      const orc = d['orchestrator'] as Record<string, unknown>;
+      discord.orchestrator = {
+        ...(typeof orc['model'] === 'string' ? { model: orc['model'] } : {}),
+        ...(typeof orc['max_tokens'] === 'number' && orc['max_tokens'] > 0 ? { max_tokens: orc['max_tokens'] } : {}),
+      };
+    }
   }
 
   // --- projects ---
